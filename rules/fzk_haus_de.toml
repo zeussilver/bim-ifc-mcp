@@ -1,0 +1,40 @@
+# Project rule set for the KIT FZK-Haus sample (German room names).
+#
+# Same engine and rule types as the packaged defaults; only the configuration
+# changes per project. The default bedroom rule matches "bed" and so checks no
+# room in this model (run_rules reports checked = 0); here the pattern matches
+# the German names instead. Thresholds remain examples for screening.
+
+name = "FZK-Haus screening rules (German room names)"
+description = "Default example thresholds with room-name patterns adapted to a German model."
+placeholder_values = ["Fire Rating", "TBC", "TBA", "TBD", "?"]
+
+[[rules]]
+id = "DOOR-WIDTH-01"
+type = "door_min_width"
+title = "Door width >= 850 mm"
+reference = "AS 1428.1-2009 cl. 13.2 (850 mm clear opening). Screened on IfcDoor.OverallWidth, the overall (nominal) width, which is never less than the clear opening: a FAIL is definite, a PASS only means the door is not ruled out"
+min_width_mm = 850
+
+[[rules]]
+id = "SPACE-AREA-01"
+type = "space_min_area"
+title = "Bedroom floor area >= 9.0 m2"
+reference = "Victoria Planning Provisions cl. 58.07-1, Standard D26 / Table D11: bedrooms min. 3.0 x 3.0 m (example; the standard sets dimensions, screened here as area)"
+min_area_m2 = 9.0
+# Schlafzimmer = bedroom, Kinderzimmer = children's room
+name_pattern = 'schlaf|kind'
+
+[[rules]]
+id = "FIRE-DOOR-01"
+type = "fire_door_self_closing"
+title = "Fire-rated doors are self-closing"
+severity = "critical"
+reference = "NCC 2022 Vol. One Part C4, e.g. C4D5 / C4D6 (required fire doors self-closing or automatic closing); doorsets to AS 1905.1 via Spec 12"
+
+[[rules]]
+id = "FIRE-DOOR-02"
+type = "door_in_fire_wall_rated"
+title = "Doors in fire-rated walls carry a fire rating"
+severity = "critical"
+reference = "NCC 2022 Vol. One Part C4 (protection of openings), e.g. C4D6 doorways in fire walls; wall FRLs per Spec 5"

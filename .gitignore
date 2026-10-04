@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Third-party sample models (fetch with scripts/fetch_samples.py)
+models/external/
+
+# Generated issue exports
+out/
+.DS_Store
+.pytest_cache/

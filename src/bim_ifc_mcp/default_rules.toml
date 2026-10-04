@@ -1,0 +1,56 @@
+# Default rule set for bim-ifc-mcp.
+#
+# The thresholds below are EXAMPLES for early-design screening only. Confirm every
+# value against the project's NCC / Australian Standards / planning requirements
+# before relying on a result. To customise, copy this file, edit it and pass its
+# path as rules_path.
+#
+# Every [[rules]] entry needs: id (unique), type, title. Optional: severity
+# (critical | major | minor | info, default major) and reference. Rule types:
+#   door_min_width           min_width_mm (number)
+#   space_min_area           min_area_m2 (number), name_pattern (optional regex,
+#                            case-insensitive, matched against room number and name)
+#   fire_door_self_closing   (no parameters)
+#   door_in_fire_wall_rated  (no parameters)
+# Unknown keys are rejected, so a typo cannot silently change what a rule checks.
+# Write regexes as TOML literal strings ('...'): in "..." a \b becomes a backspace.
+
+name = "Default screening rules (examples)"
+description = "Example accessibility, room-size and fire-door checks for early design screening. Thresholds are examples; confirm against the project's NCC, AS and planning requirements."
+
+# Values exporters leave in a field instead of real data (compared case-insensitively).
+# Revit 2011 exports the literal text "Fire Rating" when the parameter was never filled in.
+# The fire rules report such doors as UNKNOWN instead of treating them as fire-rated.
+placeholder_values = ["Fire Rating", "TBC", "TBA", "TBD", "?"]
+
+[[rules]]
+id = "DOOR-WIDTH-01"
+type = "door_min_width"
+title = "Door width >= 850 mm"
+severity = "major"
+reference = "AS 1428.1-2009 cl. 13.2 (850 mm clear opening). Screened on IfcDoor.OverallWidth, the overall (nominal) width, which is never less than the clear opening: a FAIL is definite, a PASS only means the door is not ruled out"
+min_width_mm = 850
+
+[[rules]]
+id = "SPACE-AREA-01"
+type = "space_min_area"
+title = "Bedroom floor area >= 9.0 m2"
+severity = "major"
+reference = "Victoria Planning Provisions cl. 58.07-1, Standard D26 / Table D11: bedrooms min. 3.0 x 3.0 m, main bedroom 3.0 x 3.4 m (example; the standard sets dimensions, screened here as area)"
+min_area_m2 = 9.0
+# Only rooms whose number or name contains "bed"; German models would need e.g. "bed|schlaf".
+name_pattern = 'bed'
+
+[[rules]]
+id = "FIRE-DOOR-01"
+type = "fire_door_self_closing"
+title = "Fire-rated doors are self-closing"
+severity = "critical"
+reference = "NCC 2022 Vol. One Part C4, e.g. C4D5 / C4D6 (required fire doors self-closing or automatic closing); doorsets to AS 1905.1 via Spec 12"
+
+[[rules]]
+id = "FIRE-DOOR-02"
+type = "door_in_fire_wall_rated"
+title = "Doors in fire-rated walls carry a fire rating"
+severity = "critical"
+reference = "NCC 2022 Vol. One Part C4 (protection of openings), e.g. C4D6 doorways in fire walls; wall FRLs per Spec 5"
