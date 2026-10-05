@@ -54,9 +54,9 @@ From the repo root:
 
 ```bash
 uv sync                                   # .venv with runtime + dev (pytest) deps from uv.lock
-uv run pytest -q                          # 94 passed, 17 skipped (real models not fetched yet)
+uv run pytest -q                          # 99 passed, 17 skipped (real models not fetched yet)
 uv run python scripts/fetch_samples.py    # optional: two public models into models/external/
-uv run pytest -q                          # 111 passed
+uv run pytest -q                          # 116 passed
 ```
 
 Try the engine without Claude:
@@ -168,10 +168,15 @@ severity, status, storey, ifc_class, element, element_name, global_id, message, 
 
 - TopicType `Error` for FAIL and `Request` for UNKNOWN (missing data is a question for the modeller,
   not a confirmed defect); Priority from the rule severity.
-- The element is selected by its IFC GlobalId. A perspective camera is aimed at the centre of the
-  element's geometry bounding box.
+- The element is selected by its IFC GlobalId. The viewpoint frames the element's geometry: a
+  clipping plane 0.2 m above a door head (or through a room at 1.5 m) hides the floors above, and
+  the perspective camera looks down from whichever side has the clearest sight lines, tested by ray
+  casting against the triangulated model, from a door's foot up and with a 0.15 m margin over cut wall
+  tops. It turns or steepens (50, 65 or 80 degrees) until a wall in front no longer hides the door.
+  Each viewpoint carries a plain grey placeholder snapshot.
 - Topic GUIDs are uuid5 of `rule_id|GlobalId`, so a re-export reuses the same topic GUIDs and tools
-  that match topics by GUID can update them instead of duplicating them (not yet import-tested).
+  that match topics by GUID can update them instead of duplicating them. In BIMcollab Zoom a second
+  import of the same file still shows 20 topics, not 40.
 - Elements follow the order of the official BCF 2.1 XSDs, characters XML forbids are replaced with
   spaces, and the header names the IFC file and its own timestamp. Every topic says it needs review
   by a qualified person.
@@ -185,11 +190,13 @@ documented to work:
 | Archicad | Native: Issue Organizer imports and exports BCF |
 | Revit | No built-in BCF; use the free BIMcollab BCF Manager add-in (published by BIMcollab) |
 | Navisworks | Not native; BIMcollab BCF Manager for Navisworks |
-| BIMcollab Zoom (free viewer) | Opens IFC and imports BCF files; double-clicking an issue opens its viewpoint |
+| BIMcollab Zoom (free viewer) | Tested with this exporter: imports the topics, a double-click opens the viewpoint with the element selected |
 | Bluebeam Revu | No documented BCF support; hand off the CSV or a marked-up PDF instead |
 
-The exports are checked by the test suite, not yet by importing them into these tools.
-<!-- After testing: "Tested in BIMcollab Zoom <version>". -->
+**Tested in BIMcollab Zoom 9.9 (build 9.9.3, Issues panel 7.2.96.0) on macOS, 2026-10-05:** the Duplex export imports as 20 topics, re-importing it updates them rather than
+adding 20 more, and a double-click on a topic jumps to its door with the floor above cut away, the
+whole door in view and the door selected. Getting there took three rounds; see "What real data
+taught me". The other tools in the table have not been tested with this exporter.
 
 ## Results on real models
 
@@ -234,6 +241,13 @@ geometry. On FZK-Haus the default bedroom rule checks no rooms (`checked = 0`). 
 - **Placement is not location.** Revit placed 19 of the Duplex's 21 IfcSpaces at their storey origin
   (all except the two surface-model hallways), so the placement does not locate a room. BCF cameras
   aim at the geometry's bounding-box centre.
+- **A schema-valid BCF is not enough; test it in the tool.** BIMcollab Zoom imported the first export
+  but would not open any viewpoint ("This issue has no viewpoint to zoom to") until each topic carried
+  a `snapshot.png`, which the BCF 2.1 schema makes optional (the same bug as IfcOpenShell issue #7152).
+  The next camera, at a fixed offset, sat inside the floor above door A104; the one after that left
+  the door's foot behind a wall whose cut top the sight line only grazed. Clipping planes, ray-cast
+  side selection from the door's foot up and a 0.15 m margin fixed both, and a test now checks every
+  Duplex topic for a clear view.
 - **Naming conventions differ between projects.** The German FZK-Haus room names match nothing under
   the default `bed` pattern. The report shows `checked = 0` instead of an empty pass, and a project
   rule file fixes it without code changes.
@@ -241,7 +255,7 @@ geometry. On FZK-Haus the default bedroom rule checks no rooms (`checked = 0`). 
 ## Testing
 
 ```bash
-uv run pytest -q                                   # full suite: 111 tests, about 1 s
+uv run pytest -q                                   # full suite: 116 tests, about 7 s
 uv run pytest -q tests/test_real_models.py -rs     # shows "run scripts/fetch_samples.py" when models are absent
 uv run python scripts/make_sample.py               # regenerate the two fixture models
 uv run python -m ifcopenshell.validate models/sample_house.ifc   # fixtures validate with 0 errors
@@ -251,7 +265,7 @@ uv run python -m ifcopenshell.validate models/sample_house.ifc   # fixtures vali
 |---|---|---|
 | `test_rules.py` | 35 | Rule engine and CSV export on hand-written rows (no IFC file): PASS / FAIL / UNKNOWN paths, placeholders, validation errors |
 | `test_queries.py` | 16 | Summary, spaces, door schedule, units, Revit marks, in IFC4 and IFC2X3 |
-| `test_bcf.py` | 15 | Zip structure, XSD element order, stable GUIDs, cameras, XML-invalid characters |
+| `test_bcf.py` | 20 | Zip structure, XSD element order, stable GUIDs, framed and unobstructed viewpoints, snapshots, XML-invalid characters |
 | `test_real_models.py` | 15 | Pinned numbers on the Duplex and FZK-Haus (skipped when the models are absent) |
 | `test_server.py` | 14 | End to end over MCP with an in-process client: tool list, annotations, `ToolError` paths, prompts |
 | `test_rules_integration.py` | 10 | Default rules, CSV and BCF on both fixtures, also over MCP; the same 6 issues whichever schema |
@@ -272,8 +286,9 @@ already match. 17 tests need those models.
 - **Footprint is not a regulatory area,** and an area rule only approximates a dimensional standard.
 - **Results depend on exported data.** Fire rules need `Pset_DoorCommon` / `Pset_WallCommon` values;
   the Duplex has no wall fire ratings, so FIRE-DOOR-02 checks 0 doors there. Room rules depend on naming.
-- **Narrow scope.** Doors and spaces only. Tested on IFC2X3 and IFC4. BCF 2.1 only, with no snapshot
-  images, and not yet import-tested in a BCF tool.
+- **Narrow scope.** Doors and spaces only. Tested on IFC2X3 and IFC4. BCF 2.1 only. Each topic's
+  snapshot is a plain grey placeholder, not a rendered view (BIMcollab will not open a viewpoint
+  without one).
 - **Local trust model.** The server runs with your permissions and opens any path it is given.
 - **Why not IDS?** buildingSMART IDS 1.0 (final, June 2024) checks properties, attributes,
   classifications and exported quantities. It explicitly cannot do geometry or computed values. It
@@ -295,7 +310,7 @@ src/bim_ifc_mcp/
 rules/fzk_haus_de.toml project rule set for German room names
 scripts/               make_sample.py (fixtures), fetch_samples.py (real models)
 models/                two generated fixtures; external/ holds fetched models (gitignored)
-tests/                 111 tests
+tests/                 116 tests
 docs/                  demo-script.md, interview-narrative.md
 ```
 

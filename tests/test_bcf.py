@@ -1,8 +1,10 @@
 import math
 import re
+import struct
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,8 +55,10 @@ ISSUES = [
 
 
 def read_bcf(path) -> dict[str, ET.Element]:
+    """Every XML member, parsed (folder entries and snapshot images skipped)."""
     with zipfile.ZipFile(path) as zf:
-        return {i.filename: ET.fromstring(zf.read(i)) for i in zf.infolist() if not i.is_dir()}
+        return {i.filename: ET.fromstring(zf.read(i)) for i in zf.infolist()
+                if not i.is_dir() and not i.filename.endswith(".png")}
 
 
 def tags(el: ET.Element) -> list[str]:
@@ -122,6 +126,8 @@ def test_zip_members_and_xml(tmp_path):
     guids = topic_guids(out)
     assert len(guids) == 3
     assert sorted(files) == sorted(["bcf.version"] + [f"{g}/{f}" for g in guids for f in ("markup.bcf", "viewpoint.bcfv")])
+    members = zipfile.ZipFile(out).namelist()
+    assert all(f"{g}/snapshot.png" in members for g in guids)
     # The BCF 2.1 README requires a folder entry per topic in the zip's central directory.
     dirs = [i.filename for i in zipfile.ZipFile(out).infolist() if i.is_dir()]
     assert sorted(dirs) == [f"{g}/" for g in guids]
@@ -138,7 +144,29 @@ def test_zip_members_and_xml(tmp_path):
         vp = markup.find("Viewpoints")
         assert GUID_RE.match(vp.get("Guid")) and vp.get("Guid") == visinfo.get("Guid") != g
         assert vp.findtext("Viewpoint") == "viewpoint.bcfv"
+        assert vp.findtext("Snapshot") == "snapshot.png"
+        assert_follows(tags(vp), ["Viewpoint", "Snapshot", "Index"])
         assert "Header" not in tags(markup)  # no model, no filename
+
+
+def test_every_topic_has_a_valid_snapshot_png(tmp_path):
+    # BIMcollab Zoom will not open a viewpoint without snapshot.png ("This issue has no viewpoint to zoom to").
+    out = bcf.issues_to_bcf(ISSUES, tmp_path / "issues.bcf", now=NOW)
+    with zipfile.ZipFile(out) as zf:
+        pngs = [zf.read(n) for n in zf.namelist() if n.endswith("/snapshot.png")]
+    assert len(pngs) == len(ISSUES)
+    png = pngs[0]
+    assert png.startswith(b"\x89PNG\r\n\x1a\n") and png[12:16] == b"IHDR"
+    assert struct.unpack(">II", png[16:24]) == (160, 120)
+    # Every chunk's CRC is right, and the pixel data inflates to 120 rows of filter byte + 160 RGB pixels.
+    pos, data = 8, b""
+    while pos < len(png):
+        length, kind = struct.unpack(">I4s", png[pos:pos + 8])
+        body = png[pos + 8:pos + 8 + length]
+        assert struct.unpack(">I", png[pos + 8 + length:pos + 12 + length])[0] == zlib.crc32(kind + body)
+        data += body if kind == b"IDAT" else b""
+        pos += 12 + length
+    assert len(zlib.decompress(data)) == 120 * (1 + 160 * 3)
 
 
 def test_element_order_follows_xsd(tmp_path):
@@ -229,11 +257,14 @@ def test_camera_only_with_placement(tmp_path, schema):
              for name, root in files.items() if name.endswith("viewpoint.bcfv")}
     assert views[space.GlobalId].find("PerspectiveCamera") is None
 
+    # The door has a placement but no geometry: a plain camera 4 m back from its origin
+    # (1, 2, 3.5) m (mm model, storey placement 3 m up), looking diagonally down at 50 degrees.
     cam = views[door.GlobalId].find("PerspectiveCamera")
     vec = {t: [float(cam.findtext(f"{t}/{a}")) for a in "XYZ"] for t in CAMERA_ORDER[:3]}
-    # Door origin is (1, 2, 3.5) m (mm model, storey placement 3 m up); camera sits at offset (-6, -6, +5) m.
-    assert vec["CameraViewPoint"] == pytest.approx([-5.0, -4.0, 8.5])
-    assert vec["CameraDirection"] == pytest.approx([6 / math.sqrt(97), 6 / math.sqrt(97), -5 / math.sqrt(97)], abs=1e-4)
+    c, s50 = math.cos(math.radians(50)) / math.sqrt(2), math.sin(math.radians(50))
+    assert vec["CameraDirection"] == pytest.approx([c, c, -s50], abs=1e-4)
+    assert vec["CameraViewPoint"] == pytest.approx([1 - 4 * c, 2 - 4 * c, 3.5 + 4 * s50], abs=1e-3)
+    assert views[door.GlobalId].find("ClippingPlanes") is None  # no geometry, no height to clip at
     up = vec["CameraUpVector"]
     assert math.hypot(*up) == pytest.approx(1, abs=1e-3)
     assert sum(u * d for u, d in zip(up, vec["CameraDirection"])) == pytest.approx(0, abs=1e-3)
@@ -247,8 +278,85 @@ def test_camera_aims_at_room_geometry_not_storey_origin(tmp_path, schema):
     room = add_revit_room(model, door.ObjectPlacement.PlacementRelTo)
     issue = make_issue(rule_id="SPACE-AREA-01", ifc_class="IfcSpace", global_id=room.GlobalId, element="A102")
     out = bcf.issues_to_bcf([issue], tmp_path / "issues.bcf", model=model, now=NOW)
-    # Room box x 4..6, y 5..8, z 3..5.7 m (storey 3 m up) has centre (5, 6.5, 4.35); camera offset (-6, -6, +5) m.
-    assert camera_point(viewpoints(out)[room.GlobalId]) == pytest.approx([-1.0, 0.5, 9.35])
+    # Room box x 4..6, y 5..8, z 3..5.7 m (storey 3 m up) has centre (5, 6.5, 4.35).
+    view = viewpoints(out)[room.GlobalId]
+    eye, direction = camera_point(view), [float(view.findtext(f"PerspectiveCamera/CameraDirection/{a}")) for a in "XYZ"]
+    to_centre = [c - e for c, e in zip((5.0, 6.5, 4.35), eye)]
+    cross = [to_centre[1] * direction[2] - to_centre[2] * direction[1],
+             to_centre[2] * direction[0] - to_centre[0] * direction[2],
+             to_centre[0] * direction[1] - to_centre[1] * direction[0]]
+    assert cross == pytest.approx([0, 0, 0], abs=1e-3)  # the sight line goes through the room's centre
+    assert eye[2] > 5.7  # looking down into the room
+    # A room is clipped at plan-cut height (floor + 1.5 m) so the floor above cannot hide it.
+    assert clipping_plane(view) == pytest.approx([5.0, 6.5, 4.5, 0.0, 0.0, 1.0])
+
+
+def add_box(model, context, ifc_class, origin_mm, size_mm):
+    """An element with a box body centred on its placement in x and y, rising from it in z."""
+    dx, dy, dz = size_mm
+    centre = model.createIfcAxis2Placement2D(model.createIfcCartesianPoint((0.0, 0.0)))
+    profile = model.createIfcRectangleProfileDef("AREA", None, centre, dx, dy)
+    origin = model.createIfcAxis2Placement3D(model.createIfcCartesianPoint((0.0, 0.0, 0.0)))
+    solid = model.createIfcExtrudedAreaSolid(profile, origin, model.createIfcDirection((0.0, 0.0, 1.0)), dz)
+    body = model.createIfcShapeRepresentation(context, "Body", "SweptSolid", [solid])
+    placement = model.createIfcLocalPlacement(
+        None, model.createIfcAxis2Placement3D(model.createIfcCartesianPoint(tuple(map(float, origin_mm)))))
+    return model.create_entity(ifc_class, GlobalId=ifcopenshell.guid.new(), ObjectPlacement=placement,
+                               Representation=model.createIfcProductDefinitionShape(None, None, [body]))
+
+
+def clipping_plane(visinfo: ET.Element) -> list[float]:
+    """Location X, Y, Z then Direction X, Y, Z of the viewpoint's single clipping plane."""
+    plane = visinfo.find("ClippingPlanes/ClippingPlane")
+    assert tags(plane) == ["Location", "Direction"]
+    return [float(plane.findtext(f"{t}/{a}")) for t in ("Location", "Direction") for a in "XYZ"]
+
+
+@pytest.mark.parametrize("schema", ["IFC4", "IFC2X3"])
+def test_door_view_is_clipped_above_the_head_and_avoids_a_blocked_side(tmp_path, schema):
+    model = ifcopenshell.file(schema=schema)
+    model.create_entity("IfcProject", GlobalId=ifcopenshell.guid.new(), Name="View Test")
+    ifcopenshell.api.unit.assign_unit(model)  # millimetres
+    context = ifcopenshell.api.context.add_context(model, context_type="Model")
+    door = add_box(model, context, "IfcDoor", (0, 0, 0), (900, 100, 2100))  # placement Y axis = world +Y
+    issue = make_issue(global_id=door.GlobalId)
+
+    def eye_y():
+        out = bcf.issues_to_bcf([issue], tmp_path / "issues.bcf", model=model, now=NOW)
+        view = viewpoints(out)[door.GlobalId]
+        # Clipped 0.2 m above the 2.1 m door head, so the floor above cannot hide the door.
+        assert clipping_plane(view) == pytest.approx([0.0, 0.0, 2.3, 0.0, 0.0, 1.0])
+        return camera_point(view)[1]
+
+    assert eye_y() < 0  # clear on both sides: the first candidate, looking along +Y from the -Y side
+    # A wall 1 m in front of that side, lower than the clipping plane, blocks the sight lines ...
+    add_box(model, context, "IfcWall", (0, -1000, 0), (6000, 200, 2250))
+    bcf.scene_mesh.cache_clear()
+    assert eye_y() > 0  # ... so the camera moves to the clear side
+
+
+@pytest.mark.parametrize("schema", ["IFC4", "IFC2X3"])
+def test_door_view_steepens_to_see_over_walls_in_front(tmp_path, schema):
+    # Door A104 in the Duplex: at 50 degrees the sight line to the door's foot only grazed the cut
+    # top of the wall in front, and BIMcollab Zoom showed the bottom of the door hidden.
+    model = ifcopenshell.file(schema=schema)
+    model.create_entity("IfcProject", GlobalId=ifcopenshell.guid.new(), Name="View Test")
+    ifcopenshell.api.unit.assign_unit(model)  # millimetres
+    context = ifcopenshell.api.context.add_context(model, context_type="Model")
+    door = add_box(model, context, "IfcDoor", (0, 0, 0), (900, 100, 2100))
+    for y in (-1400, 1400):  # walls 1.4 m away on both sides, just below the 2.3 m clipping plane
+        add_box(model, context, "IfcWall", (0, y, 0), (6000, 200, 2250))
+    out = bcf.issues_to_bcf([make_issue(global_id=door.GlobalId)], tmp_path / "issues.bcf", model=model, now=NOW)
+    view = viewpoints(out)[door.GlobalId]
+    direction = [float(view.findtext(f"PerspectiveCamera/CameraDirection/{a}")) for a in "XYZ"]
+    # Square-on at 50 degrees the walls hide the door's foot, so that camera must not be chosen ...
+    assert direction != pytest.approx([0.0, math.cos(math.radians(50)), -math.sin(math.radians(50))], abs=1e-3)
+    assert direction != pytest.approx([0.0, -math.cos(math.radians(50)), -math.sin(math.radians(50))], abs=1e-3)
+    # ... the chosen one sees the foot over the walls, with the safety margin to spare.
+    foot = [0.0, 0.0, 0.02]
+    mesh = bcf.scene_mesh(model)
+    assert bcf.blocked_sightlines(mesh, camera_point(view), [foot], below_z=2.3 + bcf.SIGHT_MARGIN_M,
+                                  ignore=door.GlobalId) == 0
 
 
 @pytest.mark.skipif(not DUPLEX.is_file(), reason="run scripts/fetch_samples.py")

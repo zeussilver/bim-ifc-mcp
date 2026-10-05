@@ -1,4 +1,4 @@
-"""Floor areas and element centres computed from IFC geometry.
+"""Floor areas, bounding boxes and sight lines computed from IFC geometry.
 
 Real Revit exports often ship spaces without base quantities ("Export base
 quantities" is off by default), so there is no NetFloorArea to read. A space's
@@ -7,8 +7,9 @@ floor area. ifcopenshell.geom returns SI metres whatever the project units, so
 the result is m2 for IFC2X3 and IFC4 alike.
 
 Revit also places most IfcSpaces at their storey origin and draws the room offset
-from there, so only the geometry says where a room is; BCF cameras aim at the
-centre of its bounding box.
+from there, so only the geometry says where a room is: BCF cameras frame an
+element's bounding box, and sight lines are tested against the triangulated
+model so a camera is not put behind a wall or a staircase.
 """
 
 from collections.abc import Iterable
@@ -43,14 +44,64 @@ def footprint_area(geometry) -> float:
     return shapely.union_all(shapely.polygons(triangles[flat])).area
 
 
-def bbox_centres(model: ifcopenshell.file, elements: Iterable) -> dict[str, list[float]]:
-    """{GlobalId: centre of the element's world bounding box in metres}. Elements without geometry are left out."""
-    centres = {}
+def element_bboxes(model: ifcopenshell.file, elements: Iterable) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """{GlobalId: (min corner, max corner) of the element's world bounding box in metres}.
+
+    Elements without geometry are left out.
+    """
+    boxes = {}
     for shape in _world_shapes(model, elements):
         verts = shape_util.get_vertices(shape.geometry)
         if len(verts):
-            centres[shape.guid] = ((verts.min(axis=0) + verts.max(axis=0)) / 2).tolist()
-    return centres
+            boxes[shape.guid] = (verts.min(axis=0), verts.max(axis=0))
+    return boxes
+
+
+@lru_cache(maxsize=4)
+def scene_mesh(model: ifcopenshell.file) -> tuple[np.ndarray, np.ndarray]:
+    """World triangles (n, 3, 3) in metres of every physical element, and the GlobalId owning each.
+
+    Openings and virtual elements are left out; so are spaces, which are not IfcElements.
+    """
+    elements = [e for e in model.by_type("IfcElement")
+                if not e.is_a("IfcFeatureElement") and not e.is_a("IfcVirtualElement")]
+    triangles, owners = [], []
+    for shape in _world_shapes(model, elements):
+        tris = shape_util.get_vertices(shape.geometry)[shape_util.get_faces(shape.geometry)]
+        triangles.append(tris)
+        owners.append(np.full(len(tris), shape.guid, dtype=object))
+    if not triangles:
+        return np.empty((0, 3, 3)), np.empty(0, dtype=object)
+    return np.concatenate(triangles), np.concatenate(owners)
+
+
+def blocked_sightlines(mesh: tuple[np.ndarray, np.ndarray], eye, targets, *, below_z: float,
+                       ignore: str) -> int:
+    """How many eye -> target segments hit a triangle, ignoring the element `ignore` and any hit
+    above `below_z` (geometry a clipping plane hides). Moller-Trumbore, vectorised per segment."""
+    triangles, owners = mesh
+    eye, targets = np.asarray(eye, float), np.asarray(targets, float)
+    lo = np.minimum(eye, targets.min(axis=0))
+    hi = np.maximum(eye, targets.max(axis=0))
+    near = ((triangles.max(axis=1) >= lo) & (triangles.min(axis=1) <= hi)).all(axis=1)
+    tris = triangles[near & (owners != ignore) & (triangles[:, :, 2].min(axis=1) <= below_z)]
+    if not len(tris):
+        return 0
+    v0, e1, e2 = tris[:, 0], tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]
+    s = eye - v0
+    q = np.cross(s, e1)
+    blocked = 0
+    for target in targets:
+        ray = target - eye
+        p = np.cross(ray, e2)
+        det = (e1 * p).sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):  # det == 0: ray parallel to the triangle
+            u = (s * p).sum(axis=1) / det
+            v = (q @ ray) / det
+            t = (e2 * q).sum(axis=1) / det
+            hit = (np.abs(det) > 1e-12) & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-6) & (t < 1 - 1e-6)
+            blocked += bool((hit & (eye[2] + t * ray[2] <= below_z)).any())
+    return blocked
 
 
 @lru_cache(maxsize=4)

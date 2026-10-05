@@ -234,14 +234,26 @@ def test_csv_and_bcf_export(tmp_path, path, config, issue_count):
     ]
 
     bcf_path = issues_to_bcf(issues, tmp_path / "issues.bcf", model=model, ifc_filename=path.name)
+    mesh = geometry.scene_mesh(model)
+    boxes = geometry.element_bboxes(model, [model.by_guid(i["global_id"]) for i in issues])
     with zipfile.ZipFile(bcf_path) as zf:
         topics = sorted({name.split("/")[0] for name in zf.namelist() if "/" in name})
         assert len(topics) == issue_count
         selected = set()
         for topic in topics:
             visinfo = ET.fromstring(zf.read(f"{topic}/viewpoint.bcfv"))
-            selected.add(visinfo.find("Components/Selection/Component").get("IfcGuid"))
-            assert visinfo.find("PerspectiveCamera") is not None, topic
+            guid = visinfo.find("Components/Selection/Component").get("IfcGuid")
+            selected.add(guid)
+            assert f"{topic}/snapshot.png" in zf.namelist(), topic  # BIMcollab needs it to open the viewpoint
+            eye = [float(visinfo.findtext(f"PerspectiveCamera/CameraViewPoint/{a}")) for a in "XYZ"]
+            clip_z = float(visinfo.findtext("ClippingPlanes/ClippingPlane/Location/Z"))
+            # BIMcollab Zoom showed the first camera (a fixed offset) buried in the floor above door A104,
+            # and the next one with the foot of A104 behind the wall in front. Now nothing below the
+            # clipping plane stands between the camera and the element's centre or its foot.
+            lo, hi = boxes[guid]
+            centre = (lo + hi) / 2
+            foot = [centre[0], centre[1], lo[2] + 0.02]
+            assert geometry.blocked_sightlines(mesh, eye, [centre, foot], below_z=clip_z, ignore=guid) == 0, topic
     assert selected == {i["global_id"] for i in issues}
 
 
