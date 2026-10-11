@@ -302,19 +302,16 @@ already match. 17 tests need those models.
 src/bim_ifc_mcp/
   server.py            MCP tools, prompts and error handling      (196 lines)
   ifc_queries.py       spaces, doors, units, Revit marks          (180)
-  geometry.py          footprint areas, bbox centres (shapely)    (79)
+  geometry.py          footprint areas, bboxes, sight lines       (130)
   rules.py             TOML rule engine and validation            (235)
   default_rules.toml   example screening rules                    (56)
   export.py            CSV export                                 (23)
-  bcf.py               BCF 2.1 writer                             (257)
+  bcf.py               BCF 2.1 writer                             (361)
 rules/fzk_haus_de.toml project rule set for German room names
 scripts/               make_sample.py (fixtures), fetch_samples.py (real models)
 models/                two generated fixtures; external/ holds fetched models (gitignored)
 tests/                 116 tests
-docs/                  demo-script.md, interview-narrative.md
 ```
-
-Further reading: [demo script](docs/demo-script.md) and [interview narrative](docs/interview-narrative.md).
 
 ## Sample models
 
